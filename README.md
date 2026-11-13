@@ -142,6 +142,19 @@ DB 컬럼은 C004 응답 필드명을 소문자로 그대로 사용합니다.
 2. 백엔드: 서버에 `backend/.env` 를 직접 만들고(`SYNC_TOKEN` 설정 권장) `uvicorn app.main:app --host 127.0.0.1 --port 8000` 을 systemd 등으로 실행
 3. nginx: [deploy/nginx.conf](deploy/nginx.conf) 를 참고해 `/api` 를 8000 포트로 프록시
 
+## HTTPS (Let's Encrypt)
+
+도메인이 없어 `15-165-113-119.sslip.io`(IP를 이름에 넣으면 그 IP로 해석되는 무료 DNS)로 인증서를 발급했습니다.
+"내 위치"(브라우저 위치 정보)는 HTTPS 에서만 동작합니다.
+
+- 접속 주소: https://15-165-113-119.sslip.io (http 와 IP 접속은 이 주소로 301 리다이렉트)
+- 발급: `sudo certbot certonly --webroot -w /var/www/letsencrypt -d 15-165-113-119.sslip.io`
+- nginx 설정은 저장소의 [deploy/nginx.conf](deploy/nginx.conf) 가 기준입니다. certbot 이 nginx 설정을 직접 고치지 않게
+  `certonly --webroot` 로 인증서만 받고, `/.well-known/acme-challenge/` 는 http 에서도 열어 둡니다.
+- 자동 갱신: `certbot.timer`(하루 2회 확인) + `/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh` 로 갱신 후 nginx reload.
+  점검: `sudo certbot renew --dry-run`
+- IP 가 바뀌면 `deploy/nginx.conf` 의 도메인 3곳과 인증서를 새 IP 기준으로 바꿔야 합니다.
+
 ## 자동 배포 (GitHub Actions)
 
 `main` 브랜치에 push 하면 [.github/workflows/deploy.yml](.github/workflows/deploy.yml) 이 EC2 에 SSH 로 접속해

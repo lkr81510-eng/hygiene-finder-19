@@ -47,8 +47,9 @@ jobs:
       - name: 외부 접속 확인
         if: steps.check.outputs.ready == 'true'
         run: |
-          curl -fsS -o /dev/null -w "메인 %{http_code}\n" "http://$EC2_HOST/"
-          curl -fsS "http://$EC2_HOST/api/health"
+          # http 는 https 도메인으로 리다이렉트되므로 -L 로 따라가서 최종 응답을 확인
+          curl -fsSL -o /dev/null -w "메인 %{http_code} (%{url_effective})\n" "http://$EC2_HOST/"
+          curl -fsSL "http://$EC2_HOST/api/health"
 
       - name: SSH 키 삭제
         if: always()
