@@ -10,6 +10,7 @@ export default function App() {
           <NavLink to="/" className="brand">
             <span className="brand-mark" aria-hidden="true">✓</span>
             위생등급 조회
+            <span className="brand-version">v1.1</span>
           </NavLink>
           <nav className="tabs" aria-label="주 메뉴">
             <NavLink to="/" end className="tab">
