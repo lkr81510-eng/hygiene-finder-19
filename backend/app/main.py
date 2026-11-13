@@ -17,6 +17,11 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 KST = timezone(timedelta(hours=9))
 EXPIRY_WINDOW_DAYS = 90  # "만료 임박" 기준: 지정종료일이 오늘부터 3개월 이내
 
+# 통계용 지정기관 그룹: "식품의약품안전처 식품안전정책국 식중독예방과" 같은 하위 부서는 식약처로 합친다.
+AGENCY_GROUP_SQL = (
+    "CASE WHEN hg_asgn_nm LIKE '식품의약품안전처%' THEN '식품의약품안전처' ELSE hg_asgn_nm END"
+)
+
 _tasks: set[asyncio.Task] = set()  # 백그라운드 작업 참조 유지
 
 
@@ -145,7 +150,7 @@ def stats(active_only: bool = False):
         expiring = conn.execute(f"SELECT COUNT(*) FROM shops{exp_where}", exp_params).fetchone()[0]
         by_region = _group(conn, "sido", where, params)
         by_type = _group(conn, "induty_nm", where, params)
-        by_agency = _group(conn, "hg_asgn_nm", where, params)
+        by_agency = _group(conn, AGENCY_GROUP_SQL, where, params)
         by_year = _group(conn, "substr(hg_asgn_ymd, 1, 4)", where, params, "key")
         by_month = _group(conn, "substr(hg_asgn_ymd, 1, 6)", where, params, "key")
     return {
