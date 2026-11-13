@@ -1,6 +1,7 @@
 import { NavLink, Route, Routes } from 'react-router-dom'
 import SearchPage from './pages/SearchPage.jsx'
 import StatsPage from './pages/StatsPage.jsx'
+import NearbyPage from './pages/NearbyPage.jsx'
 
 export default function App() {
   return (
@@ -16,6 +17,9 @@ export default function App() {
             <NavLink to="/" end className="tab">
               업소 검색
             </NavLink>
+            <NavLink to="/nearby" className="tab">
+              내 주변
+            </NavLink>
             <NavLink to="/stats" className="tab">
               통계
             </NavLink>
@@ -28,6 +32,7 @@ export default function App() {
       <main className="container">
         <Routes>
           <Route path="/" element={<SearchPage />} />
+          <Route path="/nearby" element={<NearbyPage />} />
           <Route path="/stats" element={<StatsPage />} />
           <Route path="*" element={<p className="empty">페이지를 찾을 수 없습니다.</p>} />
         </Routes>

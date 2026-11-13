@@ -23,3 +23,5 @@ async function request(path, params) {
 export const fetchShops = (params) => request('/shops', params)
 export const fetchStats = (params) => request('/stats', params)
 export const fetchRegion = (params) => request('/stats/region', params)
+export const fetchNearby = (params) => request('/nearby', params)
+export const geocodeAddress = (q) => request('/geocode-address', { q })

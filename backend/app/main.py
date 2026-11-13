@@ -1,12 +1,15 @@
 import asyncio
 import logging
+import math
+import time
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import config, db, sync
+from . import config, db, geocode, sync
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("hygiene")
@@ -41,10 +44,26 @@ async def _background_sync() -> None:
         log.warning("동기화 건너뜀/실패: %s", e)
 
 
-def _start_sync_task() -> None:
-    task = asyncio.create_task(_background_sync())
+async def _background_geocode(limit: int | None, retry_failed: bool, region: str | None = None) -> None:
+    try:
+        await geocode.run_geocode(limit=limit, retry_failed=retry_failed, region=region)
+    except Exception as e:
+        log.warning("지오코딩 실패: %s", e)
+
+
+def _spawn(coro) -> None:
+    task = asyncio.create_task(coro)
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
+
+
+def _start_sync_task() -> None:
+    _spawn(_background_sync())
+
+
+def _require_token(token: str | None) -> None:
+    if config.SYNC_TOKEN and token != config.SYNC_TOKEN:
+        raise HTTPException(status_code=401, detail="유효한 X-Sync-Token 헤더가 필요합니다.")
 
 
 @asynccontextmanager
@@ -53,6 +72,9 @@ async def lifespan(app: FastAPI):
     if db.get_meta().get("status") == "running":
         # 이전 프로세스가 동기화 도중 종료된 경우 상태를 정리
         db.update_meta(status="error", message="이전 동기화가 중단되었습니다.")
+    if db.get_meta("geocode_meta").get("status") == "running":
+        # 지오코딩은 재시작 시 자동으로 이어서 하지 않는다 (POST /api/geocode 로 수동 시작)
+        db.update_meta("geocode_meta", status="interrupted", message="서버 재시작으로 중단되었습니다. 다시 시작하면 남은 주소부터 이어집니다.")
     if not config.STARTUP_SYNC:
         log.info("STARTUP_SYNC=false: 시작 시 동기화를 건너뜁니다.")
     elif (count := db.shop_count()) > 0:
@@ -215,11 +237,183 @@ def sync_status():
 
 @app.post("/api/sync", status_code=202)
 async def trigger_sync(x_sync_token: str | None = Header(default=None)):
-    if config.SYNC_TOKEN and x_sync_token != config.SYNC_TOKEN:
-        raise HTTPException(status_code=401, detail="유효한 X-Sync-Token 헤더가 필요합니다.")
+    _require_token(x_sync_token)
     if not config.FOODSAFETY_API_KEY:
         raise HTTPException(status_code=400, detail="FOODSAFETY_API_KEY 가 설정되지 않았습니다.")
     if sync.is_running():
         raise HTTPException(status_code=409, detail="이미 동기화가 진행 중입니다.")
+    if geocode.is_running():
+        raise HTTPException(status_code=409, detail="지오코딩이 진행 중입니다. 끝난 뒤 동기화하세요.")
     _start_sync_task()
     return {"started": True, "status_url": "/api/sync"}
+
+
+# ---------- 지오코딩 (주소 → 좌표) ----------
+
+
+@app.get("/api/geocode")
+def geocode_status():
+    meta = db.get_meta("geocode_meta")
+    total, done = meta.get("total") or 0, meta.get("done") or 0
+    return {
+        **meta,
+        "running": geocode.is_running(),
+        "progress": round(done / total, 4) if total else None,
+        "coverage": geocode.coverage(),
+    }
+
+
+@app.post("/api/geocode", status_code=202)
+async def start_geocode(
+    limit: int | None = Query(None, ge=1, description="이번에 변환할 최대 주소 수 (없으면 남은 전체)"),
+    retry_failed: bool = Query(False, description="true 면 'error' 로 기록된 주소도 다시 시도"),
+    region: str | None = Query(None, description="시도 한정 (예: 대구, 서울, 전남광주통합특별시)"),
+    x_sync_token: str | None = Header(default=None),
+):
+    _require_token(x_sync_token)
+    if not config.KAKAO_REST_API_KEY:
+        raise HTTPException(status_code=400, detail="KAKAO_REST_API_KEY 가 설정되지 않았습니다.")
+    if geocode.is_running():
+        raise HTTPException(status_code=409, detail="이미 지오코딩이 진행 중입니다.")
+    if sync.is_running():
+        raise HTTPException(status_code=409, detail="동기화가 진행 중입니다. 끝난 뒤 지오코딩하세요.")
+    if region:
+        with db.get_conn() as conn:
+            if not conn.execute("SELECT 1 FROM shops WHERE sido = ? LIMIT 1", [region]).fetchone():
+                raise HTTPException(status_code=404, detail=f"'{region}' 지역 업소가 없습니다.")
+    _spawn(_background_geocode(limit, retry_failed, region))
+    return {"started": True, "limit": limit, "retry_failed": retry_failed, "region": region, "status_url": "/api/geocode"}
+
+
+@app.post("/api/geocode/cancel")
+def cancel_geocode(x_sync_token: str | None = Header(default=None)):
+    _require_token(x_sync_token)
+    if not geocode.is_running():
+        raise HTTPException(status_code=409, detail="진행 중인 지오코딩이 없습니다.")
+    geocode.cancel()
+    return {"cancelling": True}
+
+
+# ---------- 사용자 검색어 → 좌표 ----------
+
+LOOKUP_PER_MINUTE = 20  # IP 하나당 1분에 허용하는 주소 검색 수 (카카오 키 남용 방지)
+_lookup_hits: dict[str, deque] = {}
+
+
+def _client_ip(request: Request) -> str:
+    host = request.client.host if request.client else "unknown"
+    # nginx(같은 서버)를 거친 요청만 X-Real-IP 를 믿는다
+    if host in ("127.0.0.1", "::1"):
+        return request.headers.get("x-real-ip", host)
+    return host
+
+
+def _check_lookup_rate(ip: str) -> None:
+    now = time.monotonic()
+    hits = _lookup_hits.setdefault(ip, deque())
+    while hits and now - hits[0] > 60:
+        hits.popleft()
+    if len(hits) >= LOOKUP_PER_MINUTE:
+        retry = int(60 - (now - hits[0])) + 1
+        raise HTTPException(
+            status_code=429,
+            detail=f"주소 검색이 너무 잦습니다. {retry}초 뒤 다시 시도하세요.",
+            headers={"Retry-After": str(retry)},
+        )
+    hits.append(now)
+    if len(_lookup_hits) > 5000:  # 오래된 IP 기록 정리
+        for k in [k for k, v in _lookup_hits.items() if not v or now - v[-1] > 60]:
+            _lookup_hits.pop(k, None)
+
+
+@app.get("/api/geocode-address")
+async def geocode_address(request: Request, q: str = Query(..., min_length=2, max_length=100)):
+    """주소·동네·장소 이름을 좌표로 바꾼다. 카카오 키는 서버에서만 쓴다."""
+    if not config.KAKAO_REST_API_KEY:
+        raise HTTPException(status_code=503, detail="주소 검색이 설정되지 않았습니다.")
+    _check_lookup_rate(_client_ip(request))
+    try:
+        result = await geocode.lookup(q)
+    except geocode.GeocodeError as e:
+        log.warning("주소 검색 실패: %s", e)
+        raise HTTPException(status_code=502, detail="주소 검색 서비스에 일시적인 문제가 있습니다.")
+    if not result:
+        raise HTTPException(status_code=404, detail=f"'{q}' 위치를 찾지 못했습니다.")
+    return result
+
+
+# ---------- 내 주변 업소 ----------
+
+EARTH_RADIUS_M = 6_371_008.8
+
+
+def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(a))
+
+
+@app.get("/api/nearby")
+def nearby(
+    lat: float = Query(..., ge=33.0, le=39.0, description="위도 (대한민국 범위)"),
+    lng: float = Query(..., ge=124.0, le=132.0, description="경도 (대한민국 범위)"),
+    radius: int = Query(1000, ge=50, le=5000, description="반경(m)"),
+    type: str | None = None,
+    expiring: bool = False,
+    active_only: bool = True,
+    limit: int = Query(100, ge=1, le=300),
+):
+    # 1) 위경도 범위(사각형)로 인덱스를 타서 후보를 좁히고  2) 정확한 거리(하버사인)로 원 안만 남긴다
+    dlat = math.degrees(radius / EARTH_RADIUS_M)
+    dlng = math.degrees(radius / (EARTH_RADIUS_M * math.cos(math.radians(lat))))
+    # 업종 요약은 업종·만료 필터와 무관하게 반경 안 전체로 내므로, SQL 에서는 active_only 만 건다
+    where, params = _where(active_only=active_only)
+    box = "lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?"
+    where = f"{where} AND {box}" if where else f" WHERE {box}"
+    params += [lat - dlat, lat + dlat, lng - dlng, lng + dlng]
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            f"""SELECT id, bssh_nm, induty_nm, addr, telno, sido, sigungu, hg_asgn_nm,
+                       asgn_from, asgn_to, clsbiz_dvs_cd_nm, is_active, lat, lng
+                FROM shops{where}""",
+            params,
+        ).fetchall()
+
+    exp_start, exp_end = _expiry_range()
+    in_radius, items = [], []
+    for r in rows:
+        d = _haversine_m(lat, lng, r["lat"], r["lng"])
+        if d > radius:
+            continue
+        row = {**dict(r), "distance_m": round(d)}
+        in_radius.append(row)
+        if type and row["induty_nm"] != type:
+            continue
+        if expiring and not (row["asgn_to"] and exp_start <= row["asgn_to"] <= exp_end):
+            continue
+        items.append(row)
+    items.sort(key=lambda x: (x["distance_m"], x["bssh_nm"] or ""))
+
+    # 창업 관점 요약: 반경 안 업종별 업소 수 (업종·만료 필터 적용 전)
+    by_type: dict[str, int] = {}
+    for r in in_radius:
+        by_type[r["induty_nm"] or "미상"] = by_type.get(r["induty_nm"] or "미상", 0) + 1
+    expiring_in_radius = sum(1 for r in in_radius if r["asgn_to"] and exp_start <= r["asgn_to"] <= exp_end)
+
+    cov = geocode.coverage()
+    return {
+        "center": {"lat": lat, "lng": lng},
+        "radius": radius,
+        "total": len(items),
+        "summary": {
+            "total": len(in_radius),
+            "expiring": expiring_in_radius,
+            "by_type": [{"key": k, "count": v} for k, v in sorted(by_type.items(), key=lambda kv: (-kv[1], kv[0]))],
+        },
+        "candidates_in_box": len(rows),
+        "today": _today().strftime("%Y%m%d"),
+        "expiry_window_days": EXPIRY_WINDOW_DAYS,
+        "geocoded_ratio": round(cov["shops_located"] / cov["shops_total"], 4) if cov["shops_total"] else 0,
+        "items": items[:limit],
+    }

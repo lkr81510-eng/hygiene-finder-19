@@ -77,6 +77,10 @@ http://localhost:5173 을 엽니다. `/api` 요청은 Vite 프록시가 `http://
 | GET | `/api/shops?name=&region=&type=&active_only=&expiring=&page=&size=` | 업소 검색. `region` 은 시도(서울, 경기, 전남광주통합특별시 …), `expiring=true` 면 지정종료일 3개월 이내만 (종료일 가까운 순) |
 | GET | `/api/stats?active_only=` | 지역별/업종별/지정기관별/연도별/월별 집계, 만료 임박 수, 동기화 상태 |
 | GET | `/api/stats/region?region=&active_only=` | 지역 × 업종: 시도 내 업종별 수·비중(전국 비중 포함), 시군구 × 업종 표 |
+| GET | `/api/nearby?lat=&lng=&radius=1000&type=&expiring=&active_only=true&limit=50` | 반경(m, 50~5000) 안 업소를 거리순으로 반환 (`distance_m` 포함). 위경도 사각형으로 먼저 거른 뒤 하버사인 거리로 판정 |
+| POST | `/api/geocode?limit=&retry_failed=` | 주소 → 좌표 변환 시작 (카카오 로컬 API, 백그라운드). `SYNC_TOKEN` 설정 시 `X-Sync-Token` 필요 |
+| GET | `/api/geocode` | 지오코딩 진행률(`total`/`done`/`ok`/`not_found`/`error`)과 전체 좌표 보유 현황 |
+| POST | `/api/geocode/cancel` | 진행 중인 지오코딩 중지 (`X-Sync-Token`) |
 | POST | `/api/sync` | 수동 전체 동기화 시작 (202 반환 후 백그라운드 실행) |
 | GET | `/api/sync` | 동기화 상태 (`status`: never / running / ok / error) |
 
@@ -118,6 +122,12 @@ DB 컬럼은 C004 응답 필드명을 소문자로 그대로 사용합니다.
 - `grade`: 지정등급에서 공백을 뺀 값 (현재 데이터는 모두 '적합')
 - `is_active`: 폐업했거나 지정이 취소되었으면 0, 아니면 1
 - `sort_name`: 정렬용 업소명. 앞쪽 기호(`%`, `#`, `(` 등)를 뺀 값
+- `lat`, `lng`, `geocode_status`: 카카오 로컬 API 지오코딩 결과.
+  `geocode_status` 는 NULL(미변환) / `ok_address`(주소 검색) / `ok_keyword`(시군구+업소명 키워드 검색) / `not_found` / `error`
+
+지오코딩은 서버 시작 시 자동으로 돌지 않고 `POST /api/geocode` 로만 시작합니다(`.env` 의 `KAKAO_REST_API_KEY` 필요).
+같은 주소는 한 번만 호출하며, 동기화로 테이블을 교체할 때 주소가 같은 업소는 좌표를 이어받으므로
+동기화 뒤 다시 실행하면 새 주소(새 업소·주소 변경)와 `error` 건만 변환합니다.
 
 파생 컬럼 계산 방식이 바뀌면 `db.SCHEMA_VERSION` 을 올립니다. 서버 시작 시 저장된 원본 값으로 다시 계산하므로 API를 다시 호출하지 않아도 됩니다.
 

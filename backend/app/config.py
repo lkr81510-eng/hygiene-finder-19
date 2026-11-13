@@ -30,6 +30,13 @@ STARTUP_SYNC = _bool("STARTUP_SYNC", True)
 # 값이 있으면 POST /api/sync 호출 시 X-Sync-Token 헤더가 일치해야 한다 (배포용)
 SYNC_TOKEN = os.getenv("SYNC_TOKEN", "").strip()
 
+# 카카오 로컬 API (주소 → 좌표). 키는 .env 의 KAKAO_REST_API_KEY 에서만 읽는다.
+KAKAO_REST_API_KEY = os.getenv("KAKAO_REST_API_KEY", "").strip()
+KAKAO_API_BASE = os.getenv("KAKAO_API_BASE", "https://dapi.kakao.com").rstrip("/")
+# 초당 최대 호출 수 (주소 검색 + 키워드 검색 합산)
+GEOCODE_RPS = float(os.getenv("GEOCODE_RPS", "8"))
+GEOCODE_WORKERS = int(os.getenv("GEOCODE_WORKERS", "4"))
+
 CORS_ORIGINS = [
     o.strip()
     for o in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
