@@ -1273,3 +1273,36 @@ button:focus-visible,
   border-color: var(--accent);
   color: var(--accent);
 }
+.map-fit-btn {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  background: #ffffff;
+  color: #0b0b0b;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.map-fit-btn:hover {
+  background: #f4f4f4;
+}
+.map-wheel-hint {
+  position: absolute;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.35);
+  color: #ffffff;
+  font-size: 15px;
+  font-weight: 600;
+  text-align: center;
+  padding: 0 24px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+}
+.map-wheel-hint.show {
+  opacity: 1;
+}
