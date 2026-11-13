@@ -1,0 +1,55 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# 배포가 겹치지 않게 한 번에 하나만 실행 (진행 중인 배포는 끝까지 둔다)
+concurrency:
+  group: deploy-ec2
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USER: ${{ secrets.EC2_USER }}
+      EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+      APP_DIR: /home/${{ secrets.EC2_USER }}/hygiene-finder-19
+    steps:
+      - name: Secrets 확인
+        id: check
+        run: |
+          if [ -z "$EC2_HOST" ] || [ -z "$EC2_USER" ] || [ -z "$EC2_SSH_KEY" ]; then
+            echo "::warning::EC2_HOST / EC2_USER / EC2_SSH_KEY Secrets 가 없어 배포를 건너뜁니다."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: SSH 키 준비
+        if: steps.check.outputs.ready == 'true'
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/ec2.pem
+          chmod 600 ~/.ssh/ec2.pem
+          ssh-keyscan -T 15 -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: git pull → 빌드 → 반영 → 재시작
+        if: steps.check.outputs.ready == 'true'
+        run: |
+          ssh -i ~/.ssh/ec2.pem -o BatchMode=yes -o ConnectTimeout=20 "$EC2_USER@$EC2_HOST" \
+            "set -e; cd '$APP_DIR' && git pull --ff-only origin main && bash deploy/deploy.sh"
+
+      - name: 외부 접속 확인
+        if: steps.check.outputs.ready == 'true'
+        run: |
+          curl -fsS -o /dev/null -w "메인 %{http_code}\n" "http://$EC2_HOST/"
+          curl -fsS "http://$EC2_HOST/api/health"
+
+      - name: SSH 키 삭제
+        if: always()
+        run: rm -f ~/.ssh/ec2.pem

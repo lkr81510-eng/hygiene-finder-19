@@ -131,3 +131,27 @@ DB 컬럼은 C004 응답 필드명을 소문자로 그대로 사용합니다.
 1. 프론트 빌드: `cd frontend && npm ci && npm run build` 후 `dist/` 내용을 `/var/www/hygiene-finder` 로 복사
 2. 백엔드: 서버에 `backend/.env` 를 직접 만들고(`SYNC_TOKEN` 설정 권장) `uvicorn app.main:app --host 127.0.0.1 --port 8000` 을 systemd 등으로 실행
 3. nginx: [deploy/nginx.conf](deploy/nginx.conf) 를 참고해 `/api` 를 8000 포트로 프록시
+
+## 자동 배포 (GitHub Actions)
+
+`main` 브랜치에 push 하면 [.github/workflows/deploy.yml](.github/workflows/deploy.yml) 이 EC2 에 SSH 로 접속해
+`git pull --ff-only` 후 [deploy/deploy.sh](deploy/deploy.sh) 를 실행합니다.
+
+1. 백엔드 의존성 설치 (`pip install -r requirements.txt`)
+2. 프론트 빌드 (`npm ci && npm run build`) → `/var/www/hygiene-finder` 에 반영
+3. `deploy/nginx.conf` 가 바뀌었으면 nginx 설정 갱신 (`nginx -t` 통과 시에만 reload)
+4. `hygiene-api` 서비스 재시작 후 `/api/health` 확인
+
+`backend/.env` 와 DB 파일은 git 추적 대상이 아니므로 pull 로 바뀌지 않고, 배포 스크립트도 건드리지 않습니다.
+두 파일이 실수로 git 에 추가되면 배포가 중단됩니다.
+
+필요한 Secrets (저장소 Settings → Secrets and variables → Actions):
+
+| 이름 | 값 |
+|---|---|
+| `EC2_HOST` | EC2 퍼블릭 IP |
+| `EC2_USER` | `ubuntu` |
+| `EC2_SSH_KEY` | `.pem` 키 파일 전체 내용 (`-----BEGIN` ~ `-----END` 줄 포함) |
+
+Secrets 가 없으면 워크플로는 경고만 남기고 배포를 건너뜁니다. Actions 탭에서 `Run workflow` 로 수동 실행도 됩니다.
+> 동기화(`/api/sync`) 진행 중에 배포하면 서비스 재시작으로 동기화가 중단됩니다. 기존 데이터는 유지되며, 동기화를 다시 실행하면 됩니다.
